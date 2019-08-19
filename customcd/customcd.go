@@ -10,31 +10,43 @@ import (
 	"sync"
 )
 
-var (
-	matchedFolders []byte
-	wg             sync.WaitGroup
-)
-
-var (
-	path = os.Getenv("HOME")
-)
-
 // SearchPath searches for the real paths of folders inside the root.
 // Fetches the paths which are matched to the prefix.
 func SearchPath(prefix string) {
+	var (
+		wg             sync.WaitGroup
+		matchedFolders []byte
+	)
+
+	if prefix == "" {
+		exit(nil, nil, &notify{
+			mesgType: WARN,
+			message:  "Invalid prefix",
+		})
+	}
 	runtime.GOMAXPROCS(1)
+
 	running := make(chan struct{}, 10)
+	path := os.Getenv("HOME")
 	f, err := os.Open(path)
 	if err != nil {
-		exit(running, nil, err)
+		exit(running, nil, &notify{
+			mesgType: ERROR,
+			message:  err.Error(),
+		})
 	}
+	defer f.Close()
+
 	fSlice, err := f.Readdir(-1)
 	if err != nil {
-		exit(running, nil, err)
+		exit(running, nil, &notify{
+			mesgType: ERROR,
+			message:  err.Error(),
+		})
 	}
 	folders := make(chan []byte, len(fSlice))
 	for _, f := range fSlice {
-		if !strings.HasPrefix(f.Name(), ".") {
+		if !strings.HasPrefix(f.Name(), ".") && f.IsDir() {
 			wg.Add(1)
 			running <- struct{}{}
 			go func(f os.FileInfo) {
@@ -42,7 +54,10 @@ func SearchPath(prefix string) {
 				defer func() { <-running }()
 				foldersList, err := findFolders([]byte{}, fmt.Sprintf("%s/%s", path, f.Name()), prefix)
 				if err != nil {
-					exit(running, folders, err)
+					exit(running, folders, &notify{
+						mesgType: ERROR,
+						message:  err.Error(),
+					})
 				}
 				folders <- foldersList
 				return
@@ -54,15 +69,17 @@ func SearchPath(prefix string) {
 		select {
 		case ff := <-folders:
 			matchedFolders = append(matchedFolders, ff...)
-
 		default:
 		}
 	}
-	close(folders)
 	if len(matchedFolders) == 0 {
-		return
+		exit(running, folders, &notify{
+			mesgType: WARN,
+			message:  "No folders found. Please verify the prefix",
+		})
 	}
 	fmt.Println(string(matchedFolders[1:]))
+	exit(running, folders, nil)
 }
 
 func findFolders(folders []byte, path, prefix string) ([]byte, error) {
@@ -93,13 +110,24 @@ func findFolders(folders []byte, path, prefix string) ([]byte, error) {
 	return folders, nil
 }
 
-func exit(running chan struct{}, folders chan []byte, err error) {
+func exit(running chan struct{}, folders chan []byte, notif *notify) {
 	if running != nil {
 		close(running)
 	}
 	if folders != nil {
 		close(folders)
 	}
-	fmt.Printf("Error: %v", err)
-	os.Exit(0)
+	if notif == nil {
+		return
+	}
+
+	if notif.mesgType == WARN {
+		fmt.Printf("%sWarning: %s%s", YELLOW, WHITE, notif.message)
+		os.Exit(0)
+	}
+
+	if notif.mesgType == ERROR {
+		fmt.Printf("%sError: %s%s", RED, WHITE, notif.message)
+		os.Exit(0)
+	}
 }
